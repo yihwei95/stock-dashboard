@@ -1,0 +1,11 @@
+# Ignore Python cache
+__pycache__/
+*.py[cod]
+
+# Ignore local environment/secrets
+.env
+.streamlit/secrets.toml
+
+# Ignore local data and logs
+data/
+dashboard.log
