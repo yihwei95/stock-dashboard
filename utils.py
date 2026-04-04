@@ -1,131 +1,87 @@
 """
 utils.py
 
-Core utility module for the stock dashboard.
-
-Handles:
+Core utility module for:
 - Market data retrieval (yfinance)
-- Performance calculations
-- Portfolio aggregation
+- Performance calculation
+- Portfolio dataframe construction
 - LLM interaction (Cerebras API)
 - Observability (logging + cost tracking)
 """
 
-# External libraries for data retrieval and processing
 import yfinance as yf
 import pandas as pd
-
-# Streamlit (used for caching + session state logging)
 import streamlit as st
-
-# Standard utilities
 from datetime import datetime
+from openai import OpenAI
 import json
 import logging
-
-# OpenAI-compatible client (used with Cerebras endpoint)
-from openai import OpenAI
-
-# Type hints for better readability and maintainability
 from typing import Dict, Any, List, Tuple
 
 
 # ====================== LOGGING SETUP ======================
 
-# Configure logging to write into a file for debugging and audit
 logging.basicConfig(
-    filename='dashboard.log',            # Log file name
-    level=logging.INFO,                 # Log level (INFO and above)
-    format='%(asctime)s | %(levelname)s | %(message)s'  # Log format
+    filename='dashboard.log',
+    level=logging.INFO,
+    format='%(asctime)s | %(levelname)s | %(message)s'
 )
 
 
 # ====================== DATA FETCHING ======================
 
-@st.cache_data(ttl=60)  # Cache results for 60 seconds to reduce API calls
+@st.cache_data(ttl=60)
 def get_stock_data(symbol: str):
-    """
-    Fetch stock metadata, historical prices, and recent news.
-    """
-    ticker = yf.Ticker(symbol)           # Create yfinance ticker object
-    
-    info = ticker.info                   # Company metadata (dict)
-    hist = ticker.history(period="1y")   # 1-year historical OHLC data
-    
-    news = ticker.news[:8]               # Top 8 news articles
-    
-    return info, hist, news              # Return all three datasets
+    """Fetch stock info, 1-year history, and latest news."""
+    ticker = yf.Ticker(symbol)
+    info = ticker.info
+    hist = ticker.history(period="1y")
+    news = ticker.news[:8]
+    return info, hist, news
 
 
 def compute_performance(hist: pd.DataFrame) -> Dict[str, Any]:
-    """
-    Compute latest price and daily percentage change.
-    """
-
-    # Handle edge case: insufficient data
+    """Compute latest price and daily % change."""
     if hist.empty or len(hist) < 2:
         return {"current_price": 0.0, "day_change_pct": 0.0}
 
-    # Get latest closing price
     current = hist["Close"].iloc[-1]
-
-    # Get previous day's closing price
     prev = hist["Close"].iloc[-2]
+    change = ((current - prev) / prev) * 100
 
-    # Calculate percentage change
-    day_change = ((current - prev) / prev) * 100
-
-    # Return rounded results
     return {
         "current_price": round(current, 2),
-        "day_change_pct": round(day_change, 2),
+        "day_change_pct": round(change, 2),
     }
 
 
 def get_overview_df(stocks: List[str]) -> pd.DataFrame:
-    """
-    Build portfolio-level dataframe for UI display.
-    """
-
-    rows = []  # List to accumulate per-stock data
+    """Build portfolio dataframe for UI."""
+    rows = []
 
     for symbol in stocks:
         try:
-            # Fetch stock data
             info, hist, _ = get_stock_data(symbol)
-
-            # Compute performance metrics
             perf = compute_performance(hist)
 
-            # Extract company name (fallback if missing)
-            full_name = info.get("longName", "Unknown Company")
+            # Round trend values for clean display
+            trend_data = (
+                [round(x, 2) for x in hist["Close"].tail(30).tolist()]
+                if not hist.empty else []
+            )
 
-            # Prefer computed price, fallback to API value
-            price = perf["current_price"] or info.get("currentPrice") or 0.0
-
-            # Prefer computed change %, fallback to API value
-            change = perf["day_change_pct"] or info.get("regularMarketChangePercent", 0.0)
-
-            # Generate last 30 days trend for sparkline
-            trend_data = hist["Close"].tail(30).tolist() if not hist.empty else []
-
-            # Append structured row
             rows.append({
                 "Symbol": symbol,
-                "Company": full_name,
-                "Price": float(price),
-                "Change %": float(change),
+                "Company": info.get("longName", "Unknown"),
+                "Price": float(perf["current_price"] or info.get("currentPrice", 0)),
+                "Change %": float(perf["day_change_pct"] or info.get("regularMarketChangePercent", 0)),
                 "30-Day Trend": trend_data,
                 "Volume": info.get("regularMarketVolume", 0),
-                "Market Cap": (
-                    f"${info.get('marketCap', 0)/1e9:.1f}B"
-                    if info.get("marketCap") else "N/A"
-                ),
+                "Market Cap": f"${info.get('marketCap', 0)/1e9:.1f}B" if info.get("marketCap") else "N/A",
                 "PE Ratio": info.get("trailingPE"),
             })
 
-        except Exception:
-            # Fail-safe: ensure one bad ticker doesn't break entire dashboard
+        except:
             rows.append({
                 "Symbol": symbol,
                 "Company": "N/A",
@@ -137,40 +93,24 @@ def get_overview_df(stocks: List[str]) -> pd.DataFrame:
                 "PE Ratio": None
             })
 
-    # Convert list of dicts into DataFrame
     return pd.DataFrame(rows)
 
 
 # ====================== LLM OBSERVABILITY ======================
 
 def calculate_cost(usage: Dict) -> float:
-    """
-    Estimate cost based on token usage.
-    """
-
+    """Estimate token cost."""
     if not usage:
         return 0.0
-
-    # Sum prompt and completion tokens
     tokens = usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0)
-
-    # Convert to cost (assume $0.10 per 1M tokens)
     return round(tokens / 1_000_000 * 0.10, 4)
 
 
 def _log_llm_call(target: str, call_type: str, prompt_preview: str, response_preview: str, usage: Dict = None):
-    """
-    Store LLM call metadata in Streamlit session state.
-    """
-
-    # Initialize storage if not present
+    """Store LLM logs in session."""
     if "llm_logs" not in st.session_state:
         st.session_state.llm_logs = []
 
-    # Estimate cost
-    cost = calculate_cost(usage)
-
-    # Build structured log entry
     log_entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "type": call_type,
@@ -181,30 +121,23 @@ def _log_llm_call(target: str, call_type: str, prompt_preview: str, response_pre
             (usage.get("prompt_tokens", 0) if usage else 0) +
             (usage.get("completion_tokens", 0) if usage else 0)
         ),
-        "cost_usd": cost,
+        "cost_usd": calculate_cost(usage),
     }
 
-    # Append to session state
     st.session_state.llm_logs.append(log_entry)
 
 
-# ====================== AI CORE FUNCTIONS ======================
+# ====================== AI FUNCTIONS ======================
 
 def get_batch_recommendations(stock_list: List[str], api_key: str) -> List[Dict]:
-    """
-    Generate tactical buy recommendations using LLM.
-    """
-
-    # Exit early if API key missing
+    """Run LLM analysis for stocks."""
     if not api_key:
         return []
 
-    # Initialize client with Cerebras endpoint
     client = OpenAI(api_key=api_key, base_url="https://api.cerebras.ai/v1")
 
     batch_data = []
 
-    # Prepare structured input data
     for symbol in stock_list:
         try:
             info, hist, news = get_stock_data(symbol)
@@ -218,79 +151,62 @@ def get_batch_recommendations(stock_list: List[str], api_key: str) -> List[Dict]
                 "news_titles": [n.get('title') for n in news[:2]]
             })
         except:
-            continue  # Skip failures silently
+            continue
 
-    # Construct prompt for strict JSON output
-    prompt = f"""Analyze these stocks and return a JSON array of objects..."""
+    prompt = f"""
+You MUST return ONLY valid JSON.
+
+Data:
+{json.dumps(batch_data)}
+"""
 
     try:
-        # Send request to LLM
         response = client.chat.completions.create(
             model="llama3.1-8b",
             messages=[
-                {"role": "system", "content": "You are a precise financial JSON server. Raw JSON only."},
+                {"role": "system", "content": "Return strict JSON only."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.1  # Low randomness for consistency
+            temperature=0.1
         )
 
-        # Extract content
         content = response.choices[0].message.content.strip()
 
-        # Clean markdown formatting if present
+        # Clean markdown
         if "```" in content:
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:].strip()
+            content = content.split("```")[1].strip()
 
-        # Parse JSON
         parsed = json.loads(content)
 
-        # Extract usage metadata
         usage = response.usage.model_dump() if hasattr(response, "usage") else {}
-
-        # Log call
-        _log_llm_call(f"Batch {len(stock_list)}", "Batch Rec", prompt[:100], content[:100], usage)
+        _log_llm_call("Batch", "AI Scan", prompt[:100], content[:100], usage)
 
         return parsed
 
     except Exception as e:
-        # Log failure
-        _log_llm_call("Batch", "Error", "Batch request", str(e), {})
+        _log_llm_call("Batch", "Error", prompt[:50], str(e), {})
         return []
 
 
 def chat_with_cerebras(user_message: str, history: List[Dict], api_key: str, selected_stock: str) -> Tuple[str, Dict]:
-    """
-    Chat interface with LLM for a specific stock.
-    """
-
+    """Chat with AI."""
     if not api_key:
         return "API Key Missing", {}
 
-    # Initialize client
     client = OpenAI(api_key=api_key, base_url="https://api.cerebras.ai/v1")
 
-    # Build conversation context
-    messages = (
-        [{"role": "system", "content": f"Expert analyst for {selected_stock}"}] +
-        history +
-        [{"role": "user", "content": user_message}]
-    )
+    messages = [{"role": "system", "content": f"Expert analyst for {selected_stock}"}] + history
 
     try:
-        # Send request
         response = client.chat.completions.create(
             model="llama3.1-8b",
             messages=messages,
-            temperature=0.7  # Higher creativity for chat
+            temperature=0.7
         )
 
         reply = response.choices[0].message.content
-
         usage = response.usage.model_dump() if hasattr(response, "usage") else {}
 
-        # Log interaction
         _log_llm_call(selected_stock, "Chat", user_message[:100], reply[:100], usage)
 
         return reply, usage

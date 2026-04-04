@@ -1,239 +1,160 @@
-# Core UI framework
 import streamlit as st
-
-# Data handling
 import json
 import pandas as pd
-
-# Visualization
 import plotly.graph_objects as go
-
-# System utilities
 import os
+import time
 from datetime import datetime, timedelta
 
-# Import business logic
-from utils import (
-    get_stock_data,
-    get_overview_df,
-    get_batch_recommendations,
-    chat_with_cerebras,
-    compute_performance
-)
+from utils import *
 
 
 # ====================== PAGE CONFIG ======================
-
-# Configure page layout and branding
-st.set_page_config(
-    page_title="Secure Stock Dashboard",
-    page_icon="📈",
-    layout="wide"
-)
+st.set_page_config(page_title="Stock Dashboard", layout="wide")
 
 
-# ====================== UI STYLING ======================
-
-# Inject custom CSS to enforce light theme
-st.markdown("""
-    <style>
-        .stApp { background-color: #ffffff; color: #111111; }
-    </style>
-""", unsafe_allow_html=True)
-
-
-# ====================== AUTHENTICATION ======================
-
+# ====================== AUTH ======================
 def check_password():
-    """
-    Simple PIN-based authentication with session expiry.
-    """
-
-    def validate_pin():
-        # Compare input PIN with stored secret
-        if st.session_state["pin_input"] == st.secrets.get("APP_PIN", "123456"):
-            st.session_state["authenticated"] = True
-            st.session_state["auth_time"] = datetime.now()
+    def validate():
+        if st.session_state["pin"] == st.secrets.get("APP_PIN", "123456"):
+            st.session_state.auth = True
+            st.session_state.auth_time = datetime.now()
         else:
-            st.error("❌ Invalid PIN")
+            st.error("Invalid PIN")
 
-    # Initialize authentication state
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
+    if "auth" not in st.session_state:
+        st.session_state.auth = False
 
-    # Check session expiry (12 hours)
-    if st.session_state["authenticated"]:
-        if datetime.now() - st.session_state["auth_time"] > timedelta(hours=12):
-            st.session_state["authenticated"] = False
-            st.warning("Session expired.")
+    if st.session_state.auth:
+        if datetime.now() - st.session_state.auth_time > timedelta(hours=12):
+            st.session_state.auth = False
 
-    # If not authenticated → block app
-    if not st.session_state["authenticated"]:
-        st.title("🔒 Access Restricted")
-
-        st.text_input(
-            "Enter PIN",
-            type="password",
-            key="pin_input",
-            on_change=validate_pin
-        )
-
+    if not st.session_state.auth:
+        st.text_input("Enter PIN", type="password", key="pin", on_change=validate)
         st.stop()
 
     return True
 
 
-# ====================== MAIN APP ======================
-
 if check_password():
 
-    # Ensure data directory exists
-    os.makedirs("data", exist_ok=True)
+    # Init timestamp store
+    if "action_timestamps" not in st.session_state:
+        st.session_state.action_timestamps = {}
 
-    # Load API key securely
-    if "api_key" not in st.session_state:
-        st.session_state.api_key = st.secrets.get("CEREBRAS_API_KEY", "")
-
-    # Load stock list from file
-    if os.path.exists("stocks.json"):
-        try:
-            with open("stocks.json", "r") as f:
-                STOCKS = json.loads(f.read().strip())
-        except:
-            STOCKS = ["AAPL", "MSFT", "GOOGL"]
-    else:
-        STOCKS = ["AAPL", "MSFT", "GOOGL"]
-
-    # Track last refresh timestamp
-    if "last_refresh_time" not in st.session_state:
-        st.session_state.last_refresh_time = datetime.now().strftime("%d %b %Y, %I:%M %p")
-
-    # App title
-    st.title("📈 Professional Stock Dashboard")
-
-    # ====================== SIDEBAR ======================
-
-    with st.sidebar:
-        st.success("🔐 Session Active")
-
-        # Logout button
-        if st.button("Log Out"):
-            st.session_state["authenticated"] = False
-            st.rerun()
-
-    # ====================== TABS ======================
+    STOCKS = ["AAPL", "MSFT", "GOOGL"]
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📊 Portfolio",
-        "🔍 Deep Dive",
-        "🤖 AI Analysis",
-        "📈 Logs",
-        "📖 Dictionary"
+        "Portfolio", "Deep Dive", "AI Analysis", "Logs", "Dictionary"
     ])
 
     # ====================== TAB 1 ======================
-
     with tab1:
+        st.subheader("Portfolio")
 
-        # Refresh button
-        if st.button("🔄 Refresh Data"):
+        st.caption(f"Last Refresh: {st.session_state.action_timestamps.get('refresh','Never')}")
+
+        if st.button("Refresh Data"):
+            progress = st.progress(0)
+            status = st.empty()
+
+            status.info("Clearing cache...")
+            progress.progress(30)
             st.cache_data.clear()
+
+            status.info("Fetching data...")
+            progress.progress(70)
+            time.sleep(0.5)
+
+            status.success("Done")
+            progress.progress(100)
+
+            st.session_state.action_timestamps["refresh"] = datetime.now().strftime("%d %b %Y %H:%M:%S")
             st.rerun()
 
-        # Load portfolio data
         df = get_overview_df(STOCKS)
 
-        # Display table
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(
+            df,
+            column_config={
+                "30-Day Trend": st.column_config.LineChartColumn("Trend")
+            },
+            use_container_width=True
+        )
 
     # ====================== TAB 2 ======================
-
     with tab2:
+        sel = st.selectbox("Select", STOCKS)
 
-        # Select stock
-        sel = st.selectbox("Select Ticker", STOCKS)
-
-        # Fetch data
-        info, hist, news = get_stock_data(sel)
+        info, hist, _ = get_stock_data(sel)
         perf = compute_performance(hist)
 
-        # Candlestick chart
-        fig = go.Figure(data=[
-            go.Candlestick(
-                x=hist.index,
-                open=hist['Open'],
-                high=hist['High'],
-                low=hist['Low'],
-                close=hist['Close']
-            )
-        ])
+        fig = go.Figure(data=[go.Candlestick(
+            x=hist.index,
+            open=hist['Open'],
+            high=hist['High'],
+            low=hist['Low'],
+            close=hist['Close']
+        )])
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Metrics
         st.metric("Price", perf["current_price"])
         st.metric("Change %", perf["day_change_pct"])
 
-        # Chat history
         if "chat_history" not in st.session_state:
             st.session_state.chat_history = []
 
-        # Display messages
         for m in st.session_state.chat_history:
             with st.chat_message(m["role"]):
                 st.markdown(m["content"])
 
-        # Chat input
-        if prompt := st.chat_input("Ask AI..."):
+        if p := st.chat_input("Ask AI"):
+            with st.chat_message("assistant"):
+                placeholder = st.empty()
+                placeholder.info("Thinking...")
 
-            # Store user message
-            st.session_state.chat_history.append({"role": "user", "content": prompt})
+                reply, _ = chat_with_cerebras(p, st.session_state.chat_history, st.secrets.get("CEREBRAS_API_KEY",""), sel)
 
-            # Get AI response
-            reply, _ = chat_with_cerebras(
-                prompt,
-                st.session_state.chat_history,
-                st.session_state.api_key,
-                sel
-            )
+                placeholder.markdown(reply)
 
-            # Store response
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
 
-            st.rerun()
-
     # ====================== TAB 3 ======================
-
     with tab3:
+        st.caption(f"Last AI Scan: {st.session_state.action_timestamps.get('ai','Never')}")
 
-        # Run AI scan
         if st.button("Run AI Scan"):
+            progress = st.progress(0)
+            status = st.empty()
 
             results = []
 
-            for s in STOCKS:
-                res = get_batch_recommendations([s], st.session_state.api_key)
+            for i, s in enumerate(STOCKS):
+                status.info(f"Analyzing {s}")
+                res = get_batch_recommendations([s], st.secrets.get("CEREBRAS_API_KEY",""))
                 results.extend(res)
+                progress.progress((i+1)/len(STOCKS))
 
-            # Store results
+            status.success("Completed")
+
             st.session_state.rec_df = pd.DataFrame(results)
+            st.session_state.action_timestamps["ai"] = datetime.now().strftime("%d %b %Y %H:%M:%S")
 
-        # Display results
         if "rec_df" in st.session_state:
             st.dataframe(st.session_state.rec_df)
 
     # ====================== TAB 4 ======================
-
     with tab4:
-
-        # Display logs if available
         if "llm_logs" in st.session_state:
             st.dataframe(pd.DataFrame(st.session_state.llm_logs))
 
     # ====================== TAB 5 ======================
-
     with tab5:
+        st.header("Dictionary")
 
-        st.header("📖 Dictionary")
+        with st.expander("P/E Ratio"):
+            st.write("Valuation metric")
 
-        st.write("Basic stock market terms explained.")
+        with st.expander("Market Cap"):
+            st.write("Company value")
