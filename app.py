@@ -1,173 +1,239 @@
-"""
-app.py
-Header: Main entrypoint with a PIN-access security layer and 12-hour session persistence.
-"""
-
+# Core UI framework
 import streamlit as st
+
+# Data handling
 import json
 import pandas as pd
+
+# Visualization
 import plotly.graph_objects as go
+
+# System utilities
 import os
-import time
 from datetime import datetime, timedelta
 
+# Import business logic
 from utils import (
-    get_stock_data, get_overview_df, get_batch_recommendations,
-    chat_with_cerebras, compute_performance
+    get_stock_data,
+    get_overview_df,
+    get_batch_recommendations,
+    chat_with_cerebras,
+    compute_performance
 )
 
-# 1. Page Config
-st.set_page_config(page_title="Secure Stock Dashboard", page_icon="📈", layout="wide")
 
-# 2. Force Light Theme CSS
+# ====================== PAGE CONFIG ======================
+
+# Configure page layout and branding
+st.set_page_config(
+    page_title="Secure Stock Dashboard",
+    page_icon="📈",
+    layout="wide"
+)
+
+
+# ====================== UI STYLING ======================
+
+# Inject custom CSS to enforce light theme
 st.markdown("""
     <style>
         .stApp { background-color: #ffffff; color: #111111; }
-        [data-testid="stHeader"] { background: rgba(255,255,255,0); }
-        .stButton button { border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
 
-# 3. Security & Session Logic
+
+# ====================== AUTHENTICATION ======================
+
 def check_password():
-    """Returns True if the user has a valid PIN session within the last 12 hours."""
-    
+    """
+    Simple PIN-based authentication with session expiry.
+    """
+
     def validate_pin():
-        if st.session_state["pin_input"] == st.secrets.get("APP_PIN", "1234"):
+        # Compare input PIN with stored secret
+        if st.session_state["pin_input"] == st.secrets.get("APP_PIN", "123456"):
             st.session_state["authenticated"] = True
             st.session_state["auth_time"] = datetime.now()
-            st.success("Access Granted!")
-            time.sleep(1)
         else:
             st.error("❌ Invalid PIN")
 
-    # Initialize state
+    # Initialize authentication state
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
 
-    # Check if 12 hours have passed since last authentication
+    # Check session expiry (12 hours)
     if st.session_state["authenticated"]:
-        elapsed_time = datetime.now() - st.session_state["auth_time"]
-        if elapsed_time > timedelta(hours=12):
+        if datetime.now() - st.session_state["auth_time"] > timedelta(hours=12):
             st.session_state["authenticated"] = False
-            st.warning("Session expired. Please re-enter PIN.")
+            st.warning("Session expired.")
 
-    # Show Login Screen if not authenticated
+    # If not authenticated → block app
     if not st.session_state["authenticated"]:
         st.title("🔒 Access Restricted")
-        st.write("Please enter the authorization code to access the terminal.")
-        st.text_input("Enter 4-6 Digit PIN", type="password", key="pin_input", on_change=validate_pin)
-        st.info("Authorized sessions last for 12 hours.")
-        st.stop() # Stop execution here until authenticated
-        return False
-    
+
+        st.text_input(
+            "Enter PIN",
+            type="password",
+            key="pin_input",
+            on_change=validate_pin
+        )
+
+        st.stop()
+
     return True
 
-# 4. Main App Execution
+
+# ====================== MAIN APP ======================
+
 if check_password():
-    # --- Background Data Prep ---
+
+    # Ensure data directory exists
     os.makedirs("data", exist_ok=True)
-    
+
+    # Load API key securely
     if "api_key" not in st.session_state:
         st.session_state.api_key = st.secrets.get("CEREBRAS_API_KEY", "")
 
-    # Load stocks.json
+    # Load stock list from file
     if os.path.exists("stocks.json"):
         try:
             with open("stocks.json", "r") as f:
-                content = f.read().strip()
-                STOCKS = json.loads(content) if content else ["AAPL", "MSFT"]
+                STOCKS = json.loads(f.read().strip())
         except:
-            STOCKS = ["AAPL", "MSFT"]
+            STOCKS = ["AAPL", "MSFT", "GOOGL"]
     else:
-        STOCKS = ["AAPL", "MSFT"]
+        STOCKS = ["AAPL", "MSFT", "GOOGL"]
 
+    # Track last refresh timestamp
     if "last_refresh_time" not in st.session_state:
-        st.session_state.last_refresh_time = datetime.now().strftime("%d %B %Y, %I:%M:%S %p")
+        st.session_state.last_refresh_time = datetime.now().strftime("%d %b %Y, %I:%M %p")
 
-    # --- UI Layout ---
+    # App title
     st.title("📈 Professional Stock Dashboard")
-    
-    # Sidebar is now just for Logout and Info
+
+    # ====================== SIDEBAR ======================
+
     with st.sidebar:
-        st.success("🔐 Authenticated")
+        st.success("🔐 Session Active")
+
+        # Logout button
         if st.button("Log Out"):
             st.session_state["authenticated"] = False
             st.rerun()
-        st.divider()
-        st.caption("API connection: Secure (Cerebras)")
 
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 Portfolio", "🔍 Deep Dive", "🤖 AI Analysis", "📈 Logs"])
+    # ====================== TABS ======================
 
-    # --- Tab 1: Portfolio ---
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Portfolio",
+        "🔍 Deep Dive",
+        "🤖 AI Analysis",
+        "📈 Logs",
+        "📖 Dictionary"
+    ])
+
+    # ====================== TAB 1 ======================
+
     with tab1:
-        c1, c2 = st.columns([4, 1])
-        with c1:
-            st.subheader("Market Overview")
-            st.caption(f"⏱️ Last Update: {st.session_state.last_refresh_time}")
-        with c2:
-            if st.button("🔄 Refresh", use_container_width=True):
-                st.cache_data.clear()
-                st.session_state.last_refresh_time = datetime.now().strftime("%d %B %Y, %I:%M:%S %p")
-                st.rerun()
-        
-        df = get_overview_df(STOCKS)
-        st.dataframe(
-            df,
-            column_config={
-                "Company": st.column_config.TextColumn("Company", width="large"),
-                "30-Day Trend": st.column_config.LineChartColumn("Trend", y_min=0),
-                "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
-                "Change %": st.column_config.NumberColumn("Chg %", format="%.2f%%"),
-            },
-            use_container_width=True, hide_index=True
-        )
 
-    # --- Tab 2: Deep Dive ---
+        # Refresh button
+        if st.button("🔄 Refresh Data"):
+            st.cache_data.clear()
+            st.rerun()
+
+        # Load portfolio data
+        df = get_overview_df(STOCKS)
+
+        # Display table
+        st.dataframe(df, use_container_width=True)
+
+    # ====================== TAB 2 ======================
+
     with tab2:
-        selected_stock = st.selectbox("Pick a Stock", STOCKS)
-        info, hist, news = get_stock_data(selected_stock)
+
+        # Select stock
+        sel = st.selectbox("Select Ticker", STOCKS)
+
+        # Fetch data
+        info, hist, news = get_stock_data(sel)
         perf = compute_performance(hist)
 
-        col_chart, col_stats = st.columns([3, 1])
-        with col_chart:
-            if not hist.empty:
-                fig = go.Figure(data=[go.Candlestick(x=hist.index, open=hist["Open"], high=hist["High"], low=hist["Low"], close=hist["Close"])])
-                fig.update_layout(template="plotly_white", margin=dict(l=0, r=0, t=0, b=0))
-                st.plotly_chart(fig, use_container_width=True)
-        with col_stats:
-            st.metric("Current", f"${perf['current_price']}", f"{perf['day_change_pct']}%")
-            st.metric("Market Cap", f"${info.get('marketCap', 0)/1e9:.1f}B")
+        # Candlestick chart
+        fig = go.Figure(data=[
+            go.Candlestick(
+                x=hist.index,
+                open=hist['Open'],
+                high=hist['High'],
+                low=hist['Low'],
+                close=hist['Close']
+            )
+        ])
 
-        st.divider()
-        if prompt := st.chat_input(f"Question about {selected_stock}?"):
-            if "chat_history" not in st.session_state: st.session_state.chat_history = []
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Metrics
+        st.metric("Price", perf["current_price"])
+        st.metric("Change %", perf["day_change_pct"])
+
+        # Chat history
+        if "chat_history" not in st.session_state:
+            st.session_state.chat_history = []
+
+        # Display messages
+        for m in st.session_state.chat_history:
+            with st.chat_message(m["role"]):
+                st.markdown(m["content"])
+
+        # Chat input
+        if prompt := st.chat_input("Ask AI..."):
+
+            # Store user message
             st.session_state.chat_history.append({"role": "user", "content": prompt})
-            reply, _ = chat_with_cerebras(prompt, st.session_state.chat_history, st.session_state.api_key, selected_stock)
+
+            # Get AI response
+            reply, _ = chat_with_cerebras(
+                prompt,
+                st.session_state.chat_history,
+                st.session_state.api_key,
+                sel
+            )
+
+            # Store response
             st.session_state.chat_history.append({"role": "assistant", "content": reply})
+
             st.rerun()
 
-    # --- Tab 3: AI Recommendations ---
+    # ====================== TAB 3 ======================
+
     with tab3:
-        if st.button("🚀 Analyze All Stocks", type="primary", use_container_width=True):
-            all_results = []
-            p_bar = st.progress(0)
-            p_text = st.empty()
-            
-            for i, symbol in enumerate(STOCKS):
-                p_text.markdown(f"**Processing:** {symbol} ({i+1}/{len(STOCKS)})")
-                res = get_batch_recommendations([symbol], st.session_state.api_key)
-                all_results.extend(res)
-                p_bar.progress((i + 1) / len(STOCKS))
-            
-            p_text.success("Complete!")
-            st.session_state.recommendations_df = pd.DataFrame(all_results)
-            st.rerun()
 
-        if "recommendations_df" in st.session_state:
-            st.table(st.session_state.recommendations_df)
+        # Run AI scan
+        if st.button("Run AI Scan"):
 
-    # --- Tab 4: Observability ---
+            results = []
+
+            for s in STOCKS:
+                res = get_batch_recommendations([s], st.session_state.api_key)
+                results.extend(res)
+
+            # Store results
+            st.session_state.rec_df = pd.DataFrame(results)
+
+        # Display results
+        if "rec_df" in st.session_state:
+            st.dataframe(st.session_state.rec_df)
+
+    # ====================== TAB 4 ======================
+
     with tab4:
+
+        # Display logs if available
         if "llm_logs" in st.session_state:
-            st.write(pd.DataFrame(st.session_state.llm_logs))
+            st.dataframe(pd.DataFrame(st.session_state.llm_logs))
+
+    # ====================== TAB 5 ======================
+
+    with tab5:
+
+        st.header("📖 Dictionary")
+
+        st.write("Basic stock market terms explained.")
