@@ -1,132 +1,97 @@
-# Import Streamlit UI framework
-import streamlit as st
+"""
+app.py - Main Streamlit Stock Dashboard
+Features:
+- Portfolio overview
+- Candlestick charts
+- Async AI tactical scan (parallel + streaming)
+- Signal scoring + ranking
+- Real-time alerts
+- Robust stocks.json handling
+"""
 
-# JSON handling
-import json
-
-# Data handling
-import pandas as pd
-
-# Plotting
-import plotly.graph_objects as go
-
-# OS operations
 import os
-
-# Time for smooth UX delays
-import time
-
-# Datetime utilities
+import json
+import pandas as pd
+import streamlit as st
+import plotly.graph_objects as go
+import asyncio
 from datetime import datetime, timedelta
 
-# Parallel execution
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from utils import get_overview_df, async_ai_call, run_parallel_ai, check_alert
 
-# Import backend functions
-from utils import *
+# ====================== CONFIG ======================
 
-
-# ====================== PAGE CONFIG ======================
-
-st.set_page_config(
-    page_title="Stock Dashboard",
-    layout="wide"
-)
+st.set_page_config(page_title="AI Stock Terminal", layout="wide")
 
 
-# ====================== AUTH ======================
+# ====================== AUTHENTICATION ======================
 
 def check_password():
-    """Simple PIN authentication."""
-
-    def validate():
-        if st.session_state["pin"] == st.secrets.get("APP_PIN", "123456"):
-            st.session_state.auth = True
-            st.session_state.auth_time = datetime.now()
-        else:
-            st.error("Invalid PIN")
-
+    """Simple PIN-based authentication for the dashboard."""
     if "auth" not in st.session_state:
         st.session_state.auth = False
 
-    if st.session_state.auth:
-        if datetime.now() - st.session_state.auth_time > timedelta(hours=12):
-            st.session_state.auth = False
-
     if not st.session_state.auth:
-        st.text_input("Enter PIN", type="password", key="pin", on_change=validate)
+        pin = st.text_input("Enter 6-digit PIN", type="password")
+        if pin == st.secrets.get("APP_PIN", "123456"):
+            st.session_state.auth = True
+            st.experimental_rerun()
         st.stop()
 
     return True
 
 
-# ====================== MAIN APP ======================
-
 if check_password():
 
+    # ====================== LOAD STOCKS ======================
+
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+    STOCKS_FILE = os.path.join(BASE_DIR, "stocks.json")
+
+    try:
+        with open(STOCKS_FILE, "r") as f:
+            STOCKS = json.load(f)
+            if not isinstance(STOCKS, list) or len(STOCKS) == 0:
+                raise ValueError("stocks.json empty/invalid")
+    except Exception as e:
+        print(f"[WARN] Could not load stocks.json ({e}), using default")
+        STOCKS = ["AAPL", "MSFT", "GOOGL"]
+
+    st.session_state["STOCKS"] = STOCKS
+
     # Initialize timestamps
-    if "action_timestamps" not in st.session_state:
-        st.session_state.action_timestamps = {}
+    if "timestamps" not in st.session_state:
+        st.session_state["timestamps"] = {}
 
-    # API key
-    api_key = st.secrets.get("CEREBRAS_API_KEY", "")
+    if "rec_df" not in st.session_state:
+        st.session_state["rec_df"] = []
 
-    # Stock list
-    STOCKS = ["AAPL", "MSFT", "GOOGL"]
+    # ====================== TABS ======================
 
-    # Tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "Portfolio", "Deep Dive", "AI Analysis", "Logs", "Dictionary"
-    ])
+    tab1, tab2, tab3, tab4 = st.tabs(["Portfolio", "Charts", "AI Scan", "Alerts"])
 
-
-    # ====================== TAB 1 ======================
+    # ------------------ TAB 1: PORTFOLIO ------------------
     with tab1:
-        st.subheader("Portfolio")
-
-        # Show last refresh
-        st.caption(f"Last Refresh: {st.session_state.action_timestamps.get('refresh','Never')}")
-
-        # Refresh button
-        if st.button("Refresh Data"):
-            progress = st.progress(0)
-            status = st.empty()
-
-            status.info("Clearing cache...")
-            progress.progress(30)
-            st.cache_data.clear()
-
-            status.info("Fetching new data...")
-            progress.progress(70)
-            time.sleep(0.5)
-
-            status.success("Done")
-            progress.progress(100)
-
-            st.session_state.action_timestamps["refresh"] = datetime.now().strftime("%d %b %Y %H:%M:%S")
-            st.rerun()
-
-        # Load dataframe
+        st.subheader("📊 Portfolio Overview")
         df = get_overview_df(STOCKS)
-
-        # Display table with sparkline
         st.dataframe(
             df,
             column_config={
-                "30-Day Trend": st.column_config.LineChartColumn("Trend")
+                "30-Day Trend": st.column_config.LineChartColumn("30d Trend")
             },
             use_container_width=True
         )
 
-
-    # ====================== TAB 2 ======================
+    # ------------------ TAB 2: CHARTS ------------------
     with tab2:
-        sel = st.selectbox("Select Stock", STOCKS)
+        s = st.selectbox("Select Stock", STOCKS)
+        info, hist, _ = st.session_state.get("data", (None, None, None))  # placeholder
+        info, hist, _ = async_ai_call.get_stock_data(s) if hasattr(async_ai_call, "get_stock_data") else (None, None, None)
+        if hist is None:
+            import yfinance as yf
+            ticker = yf.Ticker(s)
+            hist = ticker.history(period="1y")
 
-        info, hist, _ = get_stock_data(sel)
-        perf = compute_performance(hist)
-
-        # Candlestick chart
         fig = go.Figure(data=[go.Candlestick(
             x=hist.index,
             open=hist["Open"],
@@ -134,102 +99,60 @@ if check_password():
             low=hist["Low"],
             close=hist["Close"]
         )])
-
+        fig.update_layout(template="plotly_white", margin=dict(l=0,r=0,t=0,b=0))
         st.plotly_chart(fig, use_container_width=True)
 
-        st.metric("Price", perf["current_price"])
-        st.metric("Change %", perf["day_change_pct"])
-
-        # Chat history
-        if "chat_history" not in st.session_state:
-            st.session_state.chat_history = []
-
-        for m in st.session_state.chat_history:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
-
-        # Chat input
-        if p := st.chat_input("Ask AI"):
-            with st.chat_message("assistant"):
-                placeholder = st.empty()
-                placeholder.info("Thinking...")
-
-                reply, _ = chat_with_cerebras(p, st.session_state.chat_history, api_key, sel)
-
-                placeholder.markdown(reply)
-
-            st.session_state.chat_history.append({"role": "assistant", "content": reply})
-
-
-    # ====================== TAB 3 ======================
+    # ------------------ TAB 3: AI SCAN ------------------
     with tab3:
-        st.subheader("🚀 AI Scan (Parallel + Live)")
-
-        st.caption(f"Last AI Scan: {st.session_state.action_timestamps.get('ai','Never')}")
-
-        if st.button("Run AI Scan", type="primary"):
-
-            placeholders = {}
-            results = []
-
-            # Create placeholders for streaming
-            for s in STOCKS:
-                placeholders[s] = st.empty()
-
+        if st.button("🚀 Run AI Scan (Async + Streaming)"):
+            status = st.empty()
             progress = st.progress(0)
-            total = len(STOCKS)
-            done = 0
+            placeholders = {s: st.empty() for s in STOCKS}
 
-            # Parallel execution
-            with ThreadPoolExecutor(max_workers=5) as executor:
+            async def run():
+                results = []
+                tasks = [async_ai_call(s, st.secrets.get("CEREBRAS_API_KEY","")) for s in STOCKS]
 
-                futures = {
-                    executor.submit(get_single_recommendation, s, api_key): s
-                    for s in STOCKS
-                }
+                for i, task in enumerate(asyncio.as_completed(tasks)):
+                    res = await task
+                    results.append(res)
+                    symbol = res.get("Symbol")
+                    text = f"{symbol} → {res.get('Recommendation')} (Score {res.get('Score')})"
 
-                # Process completed futures
-                for future in as_completed(futures):
-                    symbol = futures[future]
+                    # Streaming effect per stock
+                    for j in range(len(text)):
+                        placeholders[symbol].markdown(text[:j+1])
+                        await asyncio.sleep(0.005)
 
-                    try:
-                        res = future.result()
+                    progress.progress(len(results)/len(STOCKS))
 
-                        # Stream result immediately
-                        placeholders[symbol].success(
-                            f"**{symbol}** → {res.get('Recommendation')}\n\n{res.get('Reason')}"
-                        )
+                return results
 
-                        results.append(res)
+            # Run async
+            st.session_state.rec_df = asyncio.run(run())
 
-                    except Exception as e:
-                        placeholders[symbol].error(f"{symbol} failed: {e}")
+            # Sort by score descending
+            df = pd.DataFrame(st.session_state.rec_df).sort_values("Score", ascending=False)
+            st.dataframe(df)
 
-                    done += 1
-                    progress.progress(done / total)
+            st.session_state.timestamps["ai"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
+            st.success(f"✅ AI Scan completed at {st.session_state.timestamps['ai']}")
 
-            st.success("All completed")
-
-            st.session_state.rec_df = pd.DataFrame(results)
-            st.session_state.action_timestamps["ai"] = datetime.now().strftime("%d %b %Y %H:%M:%S")
-
-        # Show final table
-        if "rec_df" in st.session_state:
-            st.dataframe(st.session_state.rec_df)
-
-
-    # ====================== TAB 4 ======================
+    # ------------------ TAB 4: ALERTS ------------------
     with tab4:
-        if "llm_logs" in st.session_state:
-            st.dataframe(pd.DataFrame(st.session_state.llm_logs))
+        st.subheader("🔔 Real-time Alerts")
 
+        if not st.session_state.rec_df:
+            st.info("Run AI Scan first to generate alerts")
+        else:
+            alerts = []
+            for row in st.session_state.rec_df:
+                price = row.get("current_price", 0)
+                buy_range = row.get("BuyRange", "0-0")
+                if check_alert(price, buy_range):
+                    alerts.append(row["Symbol"])
 
-    # ====================== TAB 5 ======================
-    with tab5:
-        st.header("Dictionary")
-
-        with st.expander("P/E Ratio"):
-            st.write("Price-to-earnings ratio.")
-
-        with st.expander("Market Cap"):
-            st.write("Total company value.")
+            if alerts:
+                st.error(f"🔥 ALERT: {alerts}")
+            else:
+                st.success("No alerts currently")
