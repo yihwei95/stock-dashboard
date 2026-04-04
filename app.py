@@ -1,9 +1,9 @@
-# app.py - Enhanced AI Stock Dashboard with Arrow-safe portfolio, caching, and observability
+# app.py - Full Enhanced AI Stock Dashboard
 # Features:
-# - Portfolio with numeric type normalization
-# - Reduced API calls using caching
-# - AI chat with meaningful responses
-# - Async AI Scan with clean display and timestamp
+# - Portfolio overview with numeric normalization, PE ratio, Market Cap, Dividend Yield
+# - Stock market jargon dictionary below table
+# - Charts + AI Chat per stock
+# - AI Scan tab with selectable stock(s), clean async, sorted results
 # - Observability tab placeholders
 
 import os
@@ -15,12 +15,13 @@ import streamlit as st
 import plotly.graph_objects as go
 import asyncio
 from datetime import datetime
+from typing import List
 
-# Ensure local folder is in Python path
+# Ensure utils.py in path
 sys.path.append(os.path.dirname(__file__))
 
-# Import utility functions
-from utils import get_overview_df, async_ai_call, run_parallel_ai, get_stock_data, compute_performance
+# Import utilities
+from utils import get_stock_data, compute_performance, async_ai_call
 
 # ====================== CONFIG ======================
 st.set_page_config(page_title="Enhanced AI Stock Terminal", layout="wide")
@@ -60,25 +61,25 @@ if "chat_history" not in st.session_state:
     st.session_state["chat_history"] = []
 
 # ====================== TABS ======================
-tab1, tab2, tab3, tab4 = st.tabs(["Portfolio", "Charts", "AI Scan", "Observability"])
+tab1, tab2, tab3, tab4 = st.tabs(["Portfolio", "Charts & AI Chat", "AI Scan", "Observability"])
 
 # ------------------ TAB 1: PORTFOLIO ------------------
 with tab1:
     st.subheader("📊 Portfolio Overview")
 
-    # Cached function to reduce API calls
-    @st.cache_data(ttl=60)  # cache for 60 seconds to limit API usage
-    def build_portfolio_df(stocks):
+    # Cached function for API call reduction
+    @st.cache_data(ttl=60)
+    def build_portfolio_df(stocks: List[str]) -> pd.DataFrame:
         rows = []
         for symbol in stocks:
             try:
                 info, hist, news = get_stock_data(symbol)
                 perf = compute_performance(hist)
 
-                # AI recommendation cached per stock
+                # AI recommendation (cached async call for score)
                 rec = asyncio.run(async_ai_call(symbol, st.secrets.get("CEREBRAS_API_KEY", "")))
 
-                # Normalize numeric columns: replace 'N/A' with None
+                # Numeric columns normalization
                 pe_ratio = info.get("trailingPE")
                 pe_ratio = float(pe_ratio) if pe_ratio not in (None, "N/A") else np.nan
 
@@ -113,20 +114,31 @@ with tab1:
                     "Reason": "No data available",
                     "Score": 0
                 })
+
         df = pd.DataFrame(rows)
-        # Sort primarily by Score descending, then Current Price descending
-        df.sort_values(["Score", "Current Price"], ascending=[False, False], inplace=True)
+        # Alphabetical sort by Company for clarity
+        df.sort_values(["Company"], ascending=True, inplace=True)
         return df
 
     df_portfolio = build_portfolio_df(STOCKS)
-
     st.dataframe(df_portfolio, width='stretch')
 
-    ts = datetime.now().strftime("%d %b %Y, %I:%M %p")
-    st.caption(f"Last refreshed: {ts}")
+    # Stock market jargon legend below table
+    st.markdown("### 📝 Stock Market Jargon Legend")
+    st.markdown("""
+    - **PE Ratio**: Price-to-Earnings ratio
+    - **Market Cap**: Market capitalization in USD
+    - **Dividend Yield**: Dividend yield percentage
+    - **Buy Price**: Recommended price range for purchase
+    - **Recommendation**: Buy, Neutral, or Not Buy
+    - **Score**: Numeric representation of recommendation confidence
+    """)
+
+    st.caption(f"Last refreshed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
 
 # ------------------ TAB 2: CHARTS + AI CHAT ------------------
 with tab2:
+    st.subheader("📈 Stock Charts & 💬 AI Chat")
     s = st.selectbox("Select Stock", STOCKS)
     info, hist, news = get_stock_data(s)
 
@@ -141,19 +153,22 @@ with tab2:
     fig.update_layout(template="plotly_white", margin=dict(l=0,r=0,t=0,b=0))
     st.plotly_chart(fig, width='stretch')
 
+    # AI chat interface
     st.markdown("---")
     st.subheader(f"💬 Discuss {s} with AI")
     user_input = st.text_input("Ask a question about this stock:")
+
     if user_input:
+        # Async call to AI
         async def get_ai_reply():
             api_key = st.secrets.get("CEREBRAS_API_KEY", "")
             payload = {
                 "symbol": s,
                 "current_price": compute_performance(hist)["current_price"],
-                "news_titles": [n.get("title") for n in news[:3]],
+                "news_titles": [n.get("title") for n in news[:3]] or ["No news available"],
                 "question": user_input
             }
-            prompt = f"Provide a clear, actionable answer about {s}: {json.dumps(payload)}"
+            prompt = f"Provide clear actionable reasoning for {s}: {json.dumps(payload)}"
             response = await async_ai_call(s, api_key)
             return response.get("Reason", "No meaningful response")
 
@@ -161,6 +176,7 @@ with tab2:
         st.session_state.chat_history.append(("You", user_input))
         st.session_state.chat_history.append(("AI", reply))
 
+    # Display chat history
     for sender, message in st.session_state.chat_history:
         if sender == "You":
             st.markdown(f"**You:** {message}")
@@ -169,29 +185,34 @@ with tab2:
 
 # ------------------ TAB 3: AI SCAN ------------------
 with tab3:
-    st.subheader("🚀 Run AI Scan")
-    if st.button("Get Recommendations"):
+    st.subheader("🚀 AI Scan Recommendations")
+    selected_stock = st.selectbox("Select Stock to Scan (or All)", ["All"] + STOCKS)
+
+    if st.button("Get AI Recommendation"):
         progress = st.progress(0)
         placeholders = {s: st.empty() for s in STOCKS}
 
         async def run_scan():
+            stocks_to_scan = STOCKS if selected_stock == "All" else [selected_stock]
             results = []
-            tasks = [async_ai_call(s, st.secrets.get("CEREBRAS_API_KEY", "")) for s in STOCKS]
+            tasks = [async_ai_call(s, st.secrets.get("CEREBRAS_API_KEY", "")) for s in stocks_to_scan]
+
             for i, task in enumerate(asyncio.as_completed(tasks)):
                 res = await task
                 results.append(res)
                 text = f"{res['Symbol']} → {res['Recommendation']} (Buy: {res['BuyRange']}, Score: {res['Score']})"
                 placeholders[res['Symbol']].markdown(text)
-                progress.progress(len(results)/len(STOCKS))
+                progress.progress(len(results)/len(stocks_to_scan))
+
             return results
 
         st.session_state.rec_df = asyncio.run(run_scan())
-        df_rec = pd.DataFrame(st.session_state.rec_df)
-        df_rec = df_rec[["Symbol", "Recommendation", "BuyRange", "Reason", "Score"]].sort_values("Score", ascending=False)
-        st.dataframe(df_rec, width='stretch')
 
-        st.session_state.timestamps["ai_scan"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
-        st.caption(f"AI Scan completed: {st.session_state.timestamps['ai_scan']}")
+        # Display sorted dataframe
+        df_rec = pd.DataFrame(st.session_state.rec_df)
+        df_rec = df_rec[["Symbol", "Recommendation", "BuyRange", "Reason", "Score"]].sort_values(["Symbol"], ascending=True)
+        st.dataframe(df_rec, width='stretch')
+        st.caption(f"AI Scan completed: {datetime.now().strftime('%d %b %Y, %I:%M %p')}")
 
 # ------------------ TAB 4: OBSERVABILITY ------------------
 with tab4:
