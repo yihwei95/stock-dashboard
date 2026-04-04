@@ -10,25 +10,22 @@ Features:
 
 import yfinance as yf
 import pandas as pd
-import streamlit as st
 from datetime import datetime
-from openai import OpenAI
 import json
 import asyncio
 from typing import Dict, Any, List
+from openai import OpenAI
 
 # ====================== DATA FETCHING ======================
 
-@st.cache_data(ttl=60)
 def get_stock_data(symbol: str):
     """
     Fetch stock information, historical data (1 year), and news (latest 5 items).
-    Cached for 60 seconds to reduce API calls.
     """
     ticker = yf.Ticker(symbol)
     info = ticker.info
     hist = ticker.history(period="1y")
-    news = ticker.news[:5]
+    news = ticker.news[:5] if hasattr(ticker, "news") else []
     return info, hist, news
 
 
@@ -43,7 +40,6 @@ def compute_performance(hist: pd.DataFrame) -> Dict[str, Any]:
     current = hist["Close"].iloc[-1]
     prev = hist["Close"].iloc[-2]
     day_change_pct = ((current - prev) / prev) * 100
-
     return {"current_price": round(current, 2), "day_change_pct": round(day_change_pct, 2)}
 
 
@@ -69,8 +65,7 @@ def get_overview_df(stocks: List[str]) -> pd.DataFrame:
                 "Change %": perf["day_change_pct"],
                 "30-Day Trend": trend
             })
-        except Exception as e:
-            # On failure, add empty row
+        except Exception:
             rows.append({
                 "Symbol": symbol,
                 "Company": "N/A",
@@ -80,6 +75,7 @@ def get_overview_df(stocks: List[str]) -> pd.DataFrame:
             })
 
     return pd.DataFrame(rows)
+
 
 # ====================== AI / SIGNAL SCORING ======================
 
@@ -108,7 +104,6 @@ async def async_ai_call(symbol: str, api_key: str) -> Dict:
         "news_titles": [n.get("title") for n in news[:2]]
     }
 
-    # Prompt instructing LLM to return structured JSON
     prompt = f"""
 Return JSON ONLY (no markdown):
 {{
@@ -121,7 +116,6 @@ Data: {json.dumps(payload)}
 """
 
     try:
-        # LLM request
         response = client.chat.completions.create(
             model="llama3.1-8b",
             messages=[{"role": "user", "content": prompt}],
@@ -129,7 +123,6 @@ Data: {json.dumps(payload)}
         )
         content = response.choices[0].message.content.strip()
 
-        # Remove code blocks if any
         if "```" in content:
             content = content.split("```")[1]
             if content.startswith("json"):
@@ -137,10 +130,7 @@ Data: {json.dumps(payload)}
             content = content.strip()
 
         parsed = json.loads(content)
-
-        # Add numeric signal score
         parsed["Score"] = score_signal(parsed.get("Recommendation"))
-
         return parsed
 
     except Exception as e:
@@ -150,7 +140,6 @@ Data: {json.dumps(payload)}
 async def run_parallel_ai(stocks: List[str], api_key: str) -> List[Dict]:
     """
     Run AI analysis concurrently for all stocks using asyncio.as_completed.
-    Returns list of dicts with AI recommendations.
     """
     tasks = [async_ai_call(symbol, api_key) for symbol in stocks]
     results = []

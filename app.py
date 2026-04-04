@@ -1,23 +1,12 @@
-"""
-app.py - Main Streamlit Stock Dashboard
-Features:
-- Portfolio overview
-- Candlestick charts
-- Async AI tactical scan (parallel + streaming)
-- Signal scoring + ranking
-- Real-time alerts
-- Robust stocks.json handling
-"""
-
 import os
 import json
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from utils import get_overview_df, async_ai_call, run_parallel_ai, check_alert
+from utils import get_overview_df, async_ai_call, run_parallel_ai, check_alert, get_stock_data, compute_performance
 
 # ====================== CONFIG ======================
 
@@ -27,17 +16,17 @@ st.set_page_config(page_title="AI Stock Terminal", layout="wide")
 # ====================== AUTHENTICATION ======================
 
 def check_password():
-    """Simple PIN-based authentication for the dashboard."""
+    """PIN-based authentication."""
     if "auth" not in st.session_state:
         st.session_state.auth = False
 
     if not st.session_state.auth:
         pin = st.text_input("Enter 6-digit PIN", type="password")
-        if pin == st.secrets.get("APP_PIN", "123456"):
+        if pin and pin == st.secrets.get("APP_PIN", "123456"):
             st.session_state.auth = True
             st.experimental_rerun()
-        st.stop()
-
+        else:
+            st.stop()
     return True
 
 
@@ -54,12 +43,11 @@ if check_password():
             if not isinstance(STOCKS, list) or len(STOCKS) == 0:
                 raise ValueError("stocks.json empty/invalid")
     except Exception as e:
-        print(f"[WARN] Could not load stocks.json ({e}), using default")
+        st.warning(f"[WARN] Could not load stocks.json ({e}), using defaults")
         STOCKS = ["AAPL", "MSFT", "GOOGL"]
 
     st.session_state["STOCKS"] = STOCKS
 
-    # Initialize timestamps
     if "timestamps" not in st.session_state:
         st.session_state["timestamps"] = {}
 
@@ -76,22 +64,14 @@ if check_password():
         df = get_overview_df(STOCKS)
         st.dataframe(
             df,
-            column_config={
-                "30-Day Trend": st.column_config.LineChartColumn("30d Trend")
-            },
+            column_config={"30-Day Trend": st.column_config.LineChartColumn("30d Trend")},
             use_container_width=True
         )
 
     # ------------------ TAB 2: CHARTS ------------------
     with tab2:
         s = st.selectbox("Select Stock", STOCKS)
-        info, hist, _ = st.session_state.get("data", (None, None, None))  # placeholder
-        info, hist, _ = async_ai_call.get_stock_data(s) if hasattr(async_ai_call, "get_stock_data") else (None, None, None)
-        if hist is None:
-            import yfinance as yf
-            ticker = yf.Ticker(s)
-            hist = ticker.history(period="1y")
-
+        info, hist, _ = get_stock_data(s)
         fig = go.Figure(data=[go.Candlestick(
             x=hist.index,
             open=hist["Open"],
@@ -111,37 +91,27 @@ if check_password():
 
             async def run():
                 results = []
-                tasks = [async_ai_call(s, st.secrets.get("CEREBRAS_API_KEY","")) for s in STOCKS]
-
+                tasks = [async_ai_call(s, st.secrets.get("CEREBRAS_API_KEY", "")) for s in STOCKS]
                 for i, task in enumerate(asyncio.as_completed(tasks)):
                     res = await task
                     results.append(res)
                     symbol = res.get("Symbol")
                     text = f"{symbol} → {res.get('Recommendation')} (Score {res.get('Score')})"
-
-                    # Streaming effect per stock
                     for j in range(len(text)):
                         placeholders[symbol].markdown(text[:j+1])
                         await asyncio.sleep(0.005)
-
                     progress.progress(len(results)/len(STOCKS))
-
                 return results
 
-            # Run async
             st.session_state.rec_df = asyncio.run(run())
-
-            # Sort by score descending
             df = pd.DataFrame(st.session_state.rec_df).sort_values("Score", ascending=False)
             st.dataframe(df)
-
             st.session_state.timestamps["ai"] = datetime.now().strftime("%d %b %Y, %I:%M %p")
             st.success(f"✅ AI Scan completed at {st.session_state.timestamps['ai']}")
 
     # ------------------ TAB 4: ALERTS ------------------
     with tab4:
         st.subheader("🔔 Real-time Alerts")
-
         if not st.session_state.rec_df:
             st.info("Run AI Scan first to generate alerts")
         else:
@@ -151,7 +121,6 @@ if check_password():
                 buy_range = row.get("BuyRange", "0-0")
                 if check_alert(price, buy_range):
                     alerts.append(row["Symbol"])
-
             if alerts:
                 st.error(f"🔥 ALERT: {alerts}")
             else:
